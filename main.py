@@ -45,37 +45,45 @@ class Vector3D:
 ###
 
 # Arte ASCII pre-generata per diverse dimensioni di pianeti
-PLANET_SIZES = {
-    'tiny': [
-        '  ○  ',
-        ' ⚬⚬⚬ ',
-        '  ○  '
-    ],
-    'small': [
-        '   ◯◯   ',
-        '  ◯◯◯◯  ',
-        ' ◯◯◯◯◯ ',
-        '  ◯◯◯◯  ',
-        '   ◯◯   '
-    ],
-    'medium': [
-        '    ████    ',
-        '  ████████  ',
-        ' ██████████ ',
-        '████████████',
-        ' ██████████ ',
-        '  ████████  ',
-        '    ████    '
-    ]
-}
 
+def generate_asteroid_shape():
+    """Genera forme casuali per gli asteroidi usando pyfiglet e modifiche casuali."""
+    shapes = {
+        'small': [],
+        'medium': [],
+        'large': []
+    }
+
+    # Genera una forma base casuale
+    base_chars = ['@', '#', '$', '%', '&']
+    base_char = random.choice(base_chars)
+
+    # Usa pyfiglet per generare arte ASCII di base
+    figlet = pyfiglet.Figlet(font=random.choice(['small', 'mini']))
+    base_art = figlet.renderText(base_char).split('\n')
+
+    # Modifica casualmente la forma
+    def modify_shape(art, scale):
+        modified = []
+        for line in art:
+            if random.random() < 0.3:  # 30% chance di modificare la linea
+                line = line.replace(' ', random.choice([' ', '.']))
+            modified.append(line)
+        return modified
+
+    # Genera versioni di diverse dimensioni
+    shapes['small'] = modify_shape(base_art, 0.5)
+    shapes['medium'] = modify_shape(base_art, 1.0)
+    shapes['large'] = modify_shape(base_art, 1.5)
+
+    return shapes
 
 @dataclass
 class CelestialObject:
     position: Vector3D
-    type: str = 'star'  # 'star' o 'planet'
-    size: float = 1.0  # Dimensione relativa
-    features: dict = field(default_factory=dict)  # Caratteristiche procedurali
+    type: str = 'star'  # 'star', 'planet' o 'asteroid'
+    size: float = 1.0
+    features: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.features:
@@ -89,30 +97,41 @@ class CelestialObject:
             'surface_type': random.choice(['rocky', 'gaseous', 'ice']),
             'bands': random.randint(2, 5),
             'pattern_density': random.uniform(0.3, 0.7),
-            'rotation_angle': random.uniform(0, 2 * math.pi)
+            'rotation_angle': random.uniform(0, 2 * math.pi),
+            'color': random.choice([
+                curses.COLOR_RED,
+                curses.COLOR_YELLOW,
+                curses.COLOR_BLUE,
+                curses.COLOR_CYAN,
+                curses.COLOR_MAGENTA
+            ]) if self.type != 'asteroid' else curses.COLOR_WHITE,
+            'asteroid_shape': generate_asteroid_shape() if self.type == 'asteroid' else None
         }
 
-    def get_char_at_distance(self, distance: float) -> Tuple[str, List[str]]:
+    def get_char_at_distance(self, distance: float) -> Tuple[str, List[str], int]:
         # Calcola dimensione apparente
         apparent_size = self.size / max(distance, 0.1)
+        color = self.features['color']
 
         if apparent_size < 0.25:
-            return '', []  # Too small to render
+            return '', [], color
         elif distance > 50:
             brightness = self.features['brightness']
             if brightness > 0.8:
-                return '*', []
+                return '*', [], color
             elif brightness > 0.5:
-                return '+', []
+                return '+', [], color
             elif brightness > 0.2:
-                return '.', []
-            return '·', []
+                return '.', [], color
+            return '·', [], color
         else:
-            # Genera vista dettagliata con dimensione basata sulla distanza
             size = int(20 + (50 / max(distance, 1.0)))
-            return '#', self.generate_detailed_view(size)
+            return '#', self.generate_detailed_view(size), color
 
     def generate_detailed_view(self, size: int) -> List[str]:
+        if self.type == 'asteroid':
+            return self.generate_asteroid_view(size)
+
         view = []
         surface = self.features['surface_type']
         density = self.features['pattern_density']
@@ -130,18 +149,15 @@ class CelestialObject:
                     continue
 
                 if surface == 'rocky':
-                    # Pattern più dettagliato per pianeti rocciosi
                     val = (noise_2d(x / 3 + self.features['rotation_angle'], y / 3) * 0.5 +
                            noise_2d(x / 7 + self.features['rotation_angle'], y / 7) * 0.3 +
                            noise_2d(x / 13, y / 13) * 0.2) * density
                     char = '█' if val > 0.7 else '▓' if val > 0.5 else '▒' if val > 0.3 else '░'
                 elif surface == 'gaseous':
-                    # Bande più complesse per giganti gassosi
                     band_val = (math.sin(y * bands * math.pi / size) +
                                 math.sin(y * (bands + 1) * math.pi / size) * 0.5) * density
                     char = '═' if band_val > 0.5 else '─' if band_val > 0 else ' '
                 else:  # ice
-                    # Pattern cristallini per pianeti ghiacciati
                     val = (noise_2d(x / 4, y / 4) * 0.6 +
                            noise_2d(x / 8, y / 8) * 0.4) * density
                     char = '❄' if val > 0.8 else '•' if val > 0.5 else '·'
@@ -149,6 +165,14 @@ class CelestialObject:
                 row += char
             view.append(row)
         return view
+
+    def generate_asteroid_view(self, size: int) -> List[str]:
+        if size < 10:
+            return self.features['asteroid_shape']['small']
+        elif size < 20:
+            return self.features['asteroid_shape']['medium']
+        else:
+            return self.features['asteroid_shape']['large']
 
 def noise_2d(x: float, y: float) -> float:
     """Semplice funzione di rumore 2D per generare texture procedurali."""
@@ -320,6 +344,7 @@ class Camera:
 class SpaceGameEngine:
     def __init__(self):
         self.screen_height, self.screen_width = curses.LINES - 1, curses.COLS - 1
+        self.init_colors()
         self.objects: List[GameObject] = []
         self.celestial_objects: List[CelestialObject] = []
         self.player_ship: GameObject = None
@@ -417,40 +442,45 @@ class SpaceGameEngine:
 
         return (x, y)
 
+    def init_colors(self):
+        """Inizializza le coppie di colori per curses."""
+        curses.start_color()
+        curses.use_default_colors()
+
+        # Inizializza le coppie di colori base
+        for i in range(1, 8):
+            curses.init_pair(i, i, -1)
+
     def render_celestial_object(self, stdscr, obj: CelestialObject, projected_pos: Tuple[int, int]):
         if not self.camera:
             return
 
-        # Calcola la distanza dall'oggetto
         distance = math.sqrt(
             (obj.position.x - self.camera.position.x) ** 2 +
             (obj.position.y - self.camera.position.y) ** 2 +
             (obj.position.z - self.camera.position.z) ** 2
         )
 
-        # Calcola la dimensione apparente dell'oggetto
         apparent_size = obj.size / distance
-
-        # Non renderizzare oggetti troppo piccoli
         if apparent_size < 0.25:
             return
 
-        char, detailed_view = obj.get_char_at_distance(distance)
+        char, detailed_view, color = obj.get_char_at_distance(distance)
+        color_pair = curses.color_pair(color)
 
         if not detailed_view:
             if (0 <= projected_pos[0] < self.screen_width and
                     0 <= projected_pos[1] < self.screen_height):
                 try:
-                    stdscr.addch(projected_pos[1], projected_pos[0], char)
+                    stdscr.addch(projected_pos[1], projected_pos[0], char, color_pair)
                 except curses.error:
                     pass
         else:
-            # Calcola la dimensione del rendering basata sulla distanza
             size_factor = min(5.0, max(1.0, 20.0 / distance))
             scaled_view = self.scale_detailed_view(detailed_view, size_factor)
 
             half_height = len(scaled_view) // 2
-            half_width = len(scaled_view[0]) // 2
+            half_width = len(scaled_view[0]) // 2 if scaled_view else 0
 
             for y, row in enumerate(scaled_view):
                 screen_y = projected_pos[1] - half_height + y
@@ -464,7 +494,7 @@ class SpaceGameEngine:
 
                     try:
                         if char != ' ':
-                            stdscr.addch(screen_y, screen_x, char)
+                            stdscr.addch(screen_y, screen_x, char, color_pair)
                     except curses.error:
                         pass
 
