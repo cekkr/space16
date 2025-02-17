@@ -5,7 +5,15 @@ import random
 from dataclasses import dataclass, field
 import curses
 from typing import List, Tuple, Callable, Dict
+
 import pyfiglet
+
+# Importa Pygame se disponibile
+try:
+    import pygame
+    PYGAME_AVAILABLE = True
+except ImportError:
+    PYGAME_AVAILABLE = False
 
 @dataclass
 class Vector3D:
@@ -202,9 +210,9 @@ class GameObject:
         self.rotation_x = self.target_rotation_x
         self.rotation_y = self.target_rotation_y
 
-        # Normalizza solo la rotazione orizzontale
+        # Normalizza rotazioni
         self.rotation_y = self.rotation_y % (2 * math.pi)
-        # La rotazione verticale può andare oltre i 360 gradi
+        self.rotation_x = max(min(self.rotation_x, math.pi / 2), -math.pi / 2)  # Limita la rotazione verticale
 
         # Attrito molto ridotto
         friction = 0.999
@@ -233,11 +241,12 @@ class GameObject:
         self.velocity = self.velocity + (forward * amount)
 
     def get_transformed_vertices(self) -> List[Vector3D]:
-        # Applica rotazione e traslazione ai vertici
+        # Applica rotazioni e traslazioni ai vertici
         transformed = []
         for vertex in self.vertices:
-            rotated = vertex.rotate_y(self.rotation_y)
-            transformed.append(rotated + self.position)
+            rotated_y = vertex.rotate_y(self.rotation_y)
+            rotated_x = rotated_y.rotate_x(self.rotation_x)  # Applica la rotazione verticale
+            transformed.append(rotated_x + self.position)
         return transformed
 
 ###
@@ -245,15 +254,26 @@ class GameObject:
 ###
 
 class HUDElement:
-    def __init__(self, position: Tuple[int, int], render_func: Callable):
+    def __init__(self, position: tuple[int, int], render_func: callable):
         self.position = position
         self.render_func = render_func
         self.visible = True
+        self.font_size = 16
+        self.color = (255, 255, 255)  # Default white color for Pygame
 
 
 class HUDSystem:
     def __init__(self):
-        self.elements: Dict[str, HUDElement] = {}
+        self.elements: dict[str, HUDElement] = {}
+        self.pygame_font = None
+        self.is_pygame_initialized = False
+
+    def init_pygame(self, font_name=None):
+        """Initialize Pygame font system"""
+        import pygame
+        pygame.font.init()
+        self.pygame_font = pygame.font.SysFont(font_name if font_name else 'arial', 16)
+        self.is_pygame_initialized = True
 
     def add_element(self, name: str, element: HUDElement):
         self.elements[name] = element
@@ -266,7 +286,22 @@ class HUDSystem:
         if name in self.elements:
             self.elements[name].visible = visible
 
-    def render(self, stdscr, game_state: dict):
+    def render(self, surface, game_state: dict):
+        """Render HUD elements on either curses or pygame surface"""
+        import curses
+        
+        # Check if we're using pygame or curses
+        is_pygame = not isinstance(surface, type(curses.window))
+        
+        if is_pygame:
+            if not self.is_pygame_initialized:
+                self.init_pygame()
+            self._render_pygame(surface, game_state)
+        else:
+            self._render_curses(surface, game_state)
+
+    def _render_curses(self, stdscr, game_state: dict):
+        """Render HUD elements using curses"""
         for name, element in self.elements.items():
             if element.visible:
                 try:
@@ -279,6 +314,46 @@ class HUDSystem:
                         stdscr.addstr(y, x, text)
                 except curses.error:
                     pass
+
+    def _render_pygame(self, screen, game_state: dict):
+        """Render HUD elements using Pygame"""
+        for name, element in self.elements.items():
+            if element.visible:
+                text = element.render_func(game_state)
+                if isinstance(text, list):
+                    for i, line in enumerate(text):
+                        text_surface = self.pygame_font.render(
+                            line, 
+                            True, 
+                            element.color
+                        )
+                        screen.blit(
+                            text_surface, 
+                            (element.position[1], element.position[0] + (i * element.font_size))
+                        )
+                else:
+                    text_surface = self.pygame_font.render(
+                        text, 
+                        True, 
+                        element.color
+                    )
+                    screen.blit(
+                        text_surface, 
+                        (element.position[1], element.position[0])
+                    )
+
+    def set_element_color(self, name: str, color: tuple[int, int, int]):
+        """Set color for a specific HUD element (Pygame only)"""
+        if name in self.elements:
+            self.elements[name].color = color
+
+    def set_element_font_size(self, name: str, size: int):
+        """Set font size for a specific HUD element (Pygame only)"""
+        if name in self.elements:
+            self.elements[name].font_size = size
+            if self.is_pygame_initialized:
+                import pygame
+                self.pygame_font = pygame.font.SysFont(None, size)
 
 ###
 ###
@@ -342,9 +417,18 @@ class Camera:
             )
 
 class SpaceGameEngine:
-    def __init__(self):
-        self.screen_height, self.screen_width = curses.LINES - 1, curses.COLS - 1
-        self.init_colors()
+    def __init__(self, use_pygame=False):
+        self.use_pygame = use_pygame and PYGAME_AVAILABLE
+
+        if self.use_pygame:
+            pygame.init()
+            self.screen_width, self.screen_height = 800, 600
+            self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
+            pygame.display.set_caption("Space Exploration")
+        else:
+            self.screen_height, self.screen_width = curses.LINES - 1, curses.COLS - 1
+            self.init_colors()
+
         self.objects: List[GameObject] = []
         self.celestial_objects: List[CelestialObject] = []
         self.player_ship: GameObject = None
@@ -357,13 +441,30 @@ class SpaceGameEngine:
         self.hud = HUDSystem()
         self.setup_hud()
         self.generate_celestial_objects(10000)
-
+    
     def setup_hud(self):
         # Velocità
-        self.hud.add_element("velocity", HUDElement(
-            (0, 0),
+        velocity_element = HUDElement(
+            (10, 10),  # Posizione adattata per Pygame
             lambda state: f"Velocity: {state['velocity']:.1f} u/s"
-        ))
+        )
+        velocity_element.color = (0, 255, 0)  # Verde per Pygame
+        self.hud.add_element("velocity", velocity_element)
+
+        # Controlli
+        controls_element = HUDElement(
+            (100, 10),
+            lambda state: [
+                "Controls:",
+                "W/S     - Thrust forward/back",
+                "A/D     - Turn left/right",
+                "R/F     - Pitch up/down",
+                "O/P     - Adjust FOV",
+                "Q       - Quit"
+            ]
+        )
+        controls_element.color = (200, 200, 200)  # Grigio chiaro per Pygame
+        self.hud.add_element("controls", controls_element)        
 
         # Rotazione
         self.hud.add_element("rotation", HUDElement(
@@ -378,20 +479,7 @@ class SpaceGameEngine:
         self.hud.add_element("fov", HUDElement(
             (3, 0),
             lambda state: f"FOV: {state['fov']:.1f}°"
-        ))
-
-        # Controlli
-        self.hud.add_element("controls", HUDElement(
-            (5, 0),
-            lambda state: [
-                "Controls:",
-                "W/S     - Thrust forward/back",
-                "A/D     - Turn left/right",
-                "R/F     - Pitch up/down",
-                "O/P     - Adjust FOV",
-                "Q       - Quit"
-            ]
-        ))
+        ))        
 
         self.hud.add_element("brake", HUDElement(
             (11, 0),
@@ -451,20 +539,110 @@ class SpaceGameEngine:
         for i in range(1, 8):
             curses.init_pair(i, i, -1)
 
-    def render_celestial_object(self, stdscr, obj: CelestialObject, projected_pos: Tuple[int, int]):
+    def render_celestial_object(self, surface, obj: CelestialObject, projected_pos: Tuple[int, int]):
+        """Render a celestial object using either curses or pygame"""
         if not self.camera:
             return
 
+        # Calcola la distanza dall'oggetto alla camera
         distance = math.sqrt(
             (obj.position.x - self.camera.position.x) ** 2 +
             (obj.position.y - self.camera.position.y) ** 2 +
             (obj.position.z - self.camera.position.z) ** 2
         )
 
+        # Calcola la dimensione apparente
         apparent_size = obj.size / distance
         if apparent_size < 0.25:
             return
 
+        if self.use_pygame:
+            self._render_celestial_object_pygame(surface, obj, projected_pos, distance, apparent_size)
+        else:
+            self._render_celestial_object_curses(surface, obj, projected_pos, distance, apparent_size)
+
+    def _render_celestial_object_pygame(self, screen, obj: CelestialObject, projected_pos: Tuple[int, int],
+                                        distance: float, apparent_size: float):
+        """Render celestial object using Pygame"""
+        char, detailed_view, color = obj.get_char_at_distance(distance)
+
+        # Converti i colori curses in colori RGB per Pygame
+        color_map = {
+            curses.COLOR_RED: (255, 0, 0),
+            curses.COLOR_YELLOW: (255, 255, 0),
+            curses.COLOR_BLUE: (0, 0, 255),
+            curses.COLOR_CYAN: (0, 255, 255),
+            curses.COLOR_MAGENTA: (255, 0, 255),
+            curses.COLOR_WHITE: (255, 255, 255)
+        }
+        rgb_color = color_map.get(color, (255, 255, 255))
+
+        if not detailed_view:
+            # Rendering semplice per oggetti distanti
+            if (0 <= projected_pos[0] < self.screen_width and
+                    0 <= projected_pos[1] < self.screen_height):
+                size = max(2, int(apparent_size * 5))  # Dimensione minima 2 pixel
+                pygame.draw.circle(screen, rgb_color, projected_pos, size)
+        else:
+            # Rendering dettagliato per oggetti vicini
+            size_factor = min(5.0, max(1.0, 20.0 / distance))
+            base_size = int(30 * size_factor)  # Dimensione base per oggetti dettagliati
+
+            if obj.type == 'planet':
+                # Rendering pianeta
+                pygame.draw.circle(screen, rgb_color, projected_pos, base_size)
+
+                # Aggiungi dettagli superficiali
+                if obj.features['surface_type'] == 'rocky':
+                    # Aggiungi crateri o texture rocciosa
+                    for _ in range(int(base_size / 3)):
+                        angle = random.uniform(0, 2 * math.pi)
+                        radius = random.uniform(0, base_size * 0.8)
+                        crater_x = projected_pos[0] + int(math.cos(angle) * radius)
+                        crater_y = projected_pos[1] + int(math.sin(angle) * radius)
+                        crater_size = max(1, int(base_size * 0.1))
+                        darker_color = tuple(max(0, c - 50) for c in rgb_color)
+                        pygame.draw.circle(screen, darker_color, (crater_x, crater_y), crater_size)
+
+                elif obj.features['surface_type'] == 'gaseous':
+                    # Aggiungi bande per pianeti gassosi
+                    for i in range(obj.features['bands']):
+                        offset = (i - obj.features['bands'] // 2) * (base_size / obj.features['bands'])
+                        band_rect = pygame.Rect(
+                            projected_pos[0] - base_size,
+                            projected_pos[1] + offset - base_size // obj.features['bands'],
+                            base_size * 2,
+                            base_size // obj.features['bands']
+                        )
+                        lighter_color = tuple(min(255, c + 30) for c in rgb_color)
+                        pygame.draw.ellipse(screen, lighter_color, band_rect)
+
+                elif obj.features['surface_type'] == 'ice':
+                    # Aggiungi effetto ghiacciato
+                    for _ in range(int(base_size * 2)):
+                        angle = random.uniform(0, 2 * math.pi)
+                        radius = random.uniform(0, base_size * 0.9)
+                        ice_x = projected_pos[0] + int(math.cos(angle) * radius)
+                        ice_y = projected_pos[1] + int(math.sin(angle) * radius)
+                        lighter_color = tuple(min(255, c + 50) for c in rgb_color)
+                        pygame.draw.circle(screen, lighter_color, (ice_x, ice_y), 1)
+
+            elif obj.type == 'asteroid':
+                # Rendering asteroide con forma irregolare
+                points = []
+                segments = 8
+                for i in range(segments):
+                    angle = (2 * math.pi * i) / segments
+                    radius = base_size * random.uniform(0.7, 1.0)
+                    point_x = projected_pos[0] + int(math.cos(angle) * radius)
+                    point_y = projected_pos[1] + int(math.sin(angle) * radius)
+                    points.append((point_x, point_y))
+
+                pygame.draw.polygon(screen, rgb_color, points)
+
+    def _render_celestial_object_curses(self, stdscr, obj: CelestialObject, projected_pos: Tuple[int, int],
+                                        distance: float, apparent_size: float):
+        """Render celestial object using curses (original implementation)"""
         char, detailed_view, color = obj.get_char_at_distance(distance)
         color_pair = curses.color_pair(color)
 
@@ -515,14 +693,18 @@ class SpaceGameEngine:
         delta_time = current_time - self.last_frame_time
         self.last_frame_time = current_time
 
-        # Aggiorna dimensioni schermo
-        new_height, new_width = curses.LINES - 1, curses.COLS - 1
-        if new_height != self.screen_height or new_width != self.screen_width:
-            self.screen_height, self.screen_width = new_height, new_width
-            stdscr.clear()
+        if not self.use_pygame:
+            # Aggiorna dimensioni schermo
+            new_height, new_width = curses.LINES - 1, curses.COLS - 1
+            if new_height != self.screen_height or new_width != self.screen_width:
+                self.screen_height, self.screen_width = new_height, new_width
+                stdscr.clear()
 
-        # Gestione input
-        key = stdscr.getch()
+            # Gestione input
+            key = stdscr.getch()
+        else:
+            key = pygame.key.get_pressed()
+
         braking = False
 
         if key != -1 and self.player_ship:
@@ -597,48 +779,91 @@ class SpaceGameEngine:
 
         return True
 
-    def render_frame(self, stdscr) -> None:
-        stdscr.clear()
+    def render_frame(self, stdscr=None) -> None:
+        if self.use_pygame:
+            self.screen.fill((0, 0, 0))  # Pulisci lo schermo
 
-        # Rendering degli oggetti celesti
-        for obj in self.celestial_objects:
-            projected = self.project_point(obj.position)
-            if projected[0] >= 0:
-                self.render_celestial_object(stdscr, obj, projected)
+            # Rendering oggetti celesti
+            for obj in self.celestial_objects:
+                projected = self.project_point(obj.position)
+                if projected[0] >= 0:
+                    self.render_celestial_object(self.screen, obj, projected)
 
-        # Rendering degli oggetti
-        for obj in self.objects:
-            transformed_vertices = obj.get_transformed_vertices()
-            projected_vertices = [self.project_point(vertex) for vertex in transformed_vertices]
+            # Rendering oggetti
+            for obj in self.objects:
+                transformed_vertices = obj.get_transformed_vertices()
+                projected_vertices = [self.project_point(vertex) for vertex in transformed_vertices]
 
-            for edge in obj.edges:
-                start = projected_vertices[edge[0]]
-                end = projected_vertices[edge[1]]
+                for edge in obj.edges:
+                    start = projected_vertices[edge[0]]
+                    end = projected_vertices[edge[1]]
 
-                if (start[0] >= 0 and start[1] >= 0 and
-                        end[0] >= 0 and end[1] >= 0 and
-                        start[0] < self.screen_width and start[1] < self.screen_height and
-                        end[0] < self.screen_width and end[1] < self.screen_height):
-                    self.draw_line(stdscr, start[0], start[1], end[0], end[1])
+                    if (start[0] >= 0 and start[1] >= 0 and
+                            end[0] >= 0 and end[1] >= 0 and
+                            start[0] < self.screen_width and start[1] < self.screen_height and
+                            end[0] < self.screen_width and end[1] < self.screen_height):
+                        pygame.draw.line(self.screen, (255, 255, 255), start, end)
 
-        # Aggiorna e renderizza HUD
-        if self.player_ship:
-            velocity_magnitude = math.sqrt(
-                self.player_ship.velocity.x ** 2 +
-                self.player_ship.velocity.y ** 2 +
-                self.player_ship.velocity.z ** 2
-            )
+            # Rendering HUD
+            if self.player_ship:
+                velocity_magnitude = math.sqrt(
+                    self.player_ship.velocity.x ** 2 +
+                    self.player_ship.velocity.y ** 2 +
+                    self.player_ship.velocity.z ** 2
+                )
 
-            game_state = {
-                'velocity': velocity_magnitude,
-                'rotation_y': self.player_ship.rotation_y,
-                'rotation_x': self.player_ship.rotation_x,
-                'fov': self.fov
-            }
+                game_state = {
+                    'velocity': velocity_magnitude,
+                    'rotation_y': self.player_ship.rotation_y,
+                    'rotation_x': self.player_ship.rotation_x,
+                    'fov': self.fov
+                }
 
-            self.hud.render(stdscr, game_state)
+                self.hud.render(self.screen, game_state)
 
-        stdscr.refresh()
+            pygame.display.flip()  # Aggiorna lo schermo
+        else:
+            stdscr.clear()
+
+            # Rendering degli oggetti celesti
+            for obj in self.celestial_objects:
+                projected = self.project_point(obj.position)
+                if projected[0] >= 0:
+                    self.render_celestial_object(stdscr, obj, projected)
+
+            # Rendering degli oggetti
+            for obj in self.objects:
+                transformed_vertices = obj.get_transformed_vertices()
+                projected_vertices = [self.project_point(vertex) for vertex in transformed_vertices]
+
+                for edge in obj.edges:
+                    start = projected_vertices[edge[0]]
+                    end = projected_vertices[edge[1]]
+
+                    if (start[0] >= 0 and start[1] >= 0 and
+                            end[0] >= 0 and end[1] >= 0 and
+                            start[0] < self.screen_width and start[1] < self.screen_height and
+                            end[0] < self.screen_width and end[1] < self.screen_height):
+                        self.draw_line(stdscr, start[0], start[1], end[0], end[1])
+
+            # Aggiorna e renderizza HUD
+            if self.player_ship:
+                velocity_magnitude = math.sqrt(
+                    self.player_ship.velocity.x ** 2 +
+                    self.player_ship.velocity.y ** 2 +
+                    self.player_ship.velocity.z ** 2
+                )
+
+                game_state = {
+                    'velocity': velocity_magnitude,
+                    'rotation_y': self.player_ship.rotation_y,
+                    'rotation_x': self.player_ship.rotation_x,
+                    'fov': self.fov
+                }
+
+                self.hud.render(stdscr, game_state)
+
+            stdscr.refresh()
 
     def create_player_ship(self) -> GameObject:
         # Definizione semplificata di una X-Wing
@@ -699,11 +924,13 @@ class SpaceGameEngine:
                     err += dy
                 y += sy
 
-def main(stdscr):
-    curses.curs_set(0)
-    stdscr.nodelay(1)
+def main(stdscr, use_pygame=False):    
 
-    engine = SpaceGameEngine()
+    if not use_pygame:
+        curses.curs_set(0)
+        stdscr.nodelay(1)
+
+    engine = SpaceGameEngine(use_pygame)
 
     # Crea la nave del giocatore
     player_ship = engine.create_player_ship()
@@ -713,12 +940,28 @@ def main(stdscr):
     # Inizializza la camera
     engine.camera = Camera(player_ship)
 
+    if use_pygame:
+        screen = engine.screen
+    else:
+        screen = stdscr
+
     running = True
     while running:
-        running = engine.update(stdscr)
-        engine.render_frame(stdscr)
+        running = engine.update(screen)
+        engine.render_frame(screen)
         time.sleep(0.033)
+
+    if use_pygame:
+        pygame.quit()
 
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    if PYGAME_AVAILABLE and False:
+        use_pygame = input("Use Pygame? (y/n): ").lower() == 'y'
+    else:
+        use_pygame = PYGAME_AVAILABLE
+
+    if use_pygame:
+        main(None, use_pygame)
+    else:
+        curses.wrapper(main)
