@@ -263,10 +263,11 @@ class HUDElement:
 
 
 class HUDSystem:
-    def __init__(self):
+    def __init__(self, is_pygame):
         self.elements: dict[str, HUDElement] = {}
         self.pygame_font = None
         self.is_pygame_initialized = False
+        self.is_pygame = is_pygame
 
     def init_pygame(self, font_name=None):
         """Initialize Pygame font system"""
@@ -291,7 +292,7 @@ class HUDSystem:
         import curses
         
         # Check if we're using pygame or curses
-        is_pygame = self.is_pygame_initialized
+        is_pygame = self.is_pygame
         
         if is_pygame:
             if not self.is_pygame_initialized:
@@ -453,11 +454,11 @@ class SpaceGameEngine:
         self.player_ship: GameObject = None
         self.camera: Camera = None
         self.last_frame_time = time.time()
-        self.fov = 30.0
-        self.near_plane = 0.1
+        self.fov = 60.0
+        self.near_plane = 0.00001
         self.far_plane = 100000.0
 
-        self.hud = HUDSystem()
+        self.hud = HUDSystem(is_pygame=use_pygame)
         self.setup_hud()
         self.generate_celestial_objects(10000)
 
@@ -477,30 +478,94 @@ class SpaceGameEngine:
 
             self.celestial_objects.append(CelestialObject(pos, obj_type, size))
 
+    def project_point(self, point: Vector3D) -> Tuple[int, int]:
+        if not self.camera:
+            return (-1, -1)
+
+        # Calcola la posizione relativa alla camera
+        relative_point = point - self.camera.position
+
+        # Applica la rotazione della camera
+        rotated = relative_point.rotate_y(-self.camera.rotation_y).rotate_x(-self.camera.rotation_x)
+
+        # Modifica: rimuoviamo il controllo sul near_plane e aumentiamo il far_plane
+        if rotated.z <= 0 or rotated.z > self.far_plane:
+            return (-1, -1)
+
+        # Proiezione prospettica con FOV corretto
+        fov_rad = math.radians(self.fov)
+        aspect_ratio = self.screen_width / self.screen_height
+
+        # Modificato il fattore di scala per migliorare la visibilità a lunga distanza
+        scale_y = 1.0 / math.tan(fov_rad / 2)
+        scale_x = scale_y / aspect_ratio
+
+        # Rimuoviamo il distance_scale che causava problemi con gli oggetti lontani
+        screen_x = rotated.x / rotated.z * scale_x
+        screen_y = rotated.y / rotated.z * scale_y
+
+        # Converti in coordinate schermo
+        x = int(self.screen_width / 2 * (1 + screen_x))
+        y = int(self.screen_height / 2 * (1 - screen_y))
+
+        return (x, y)
+
     def render_celestial_object(self, surface, obj: CelestialObject, projected_pos: Tuple[int, int]):
         if not self.camera:
             return
 
         # Calcola la distanza dall'oggetto alla camera
-        distance = math.sqrt(
-            (obj.position.x - self.camera.position.x) ** 2 +
-            (obj.position.y - self.camera.position.y) ** 2 +
-            (obj.position.z - self.camera.position.z) ** 2
+        relative_pos = Vector3D(
+            obj.position.x - self.camera.position.x,
+            obj.position.y - self.camera.position.y,
+            obj.position.z - self.camera.position.z
         )
 
+        # Applica la rotazione della camera per ottenere la vera distanza prospettica
+        rotated_pos = relative_pos.rotate_y(-self.camera.rotation_y).rotate_x(-self.camera.rotation_x)
+        distance = abs(rotated_pos.z)  # Usiamo la Z rotata per la distanza prospettica
+
         # Calcola la dimensione apparente
-        apparent_size = obj.size / distance
-        if apparent_size < 0.25:
+        apparent_size = obj.size / max(distance, 0.1)
+
+        # Implementazione del dithering: se l'oggetto è molto piccolo ma ancora visibile
+        dithering_threshold = 0.1  # 10% di un pixel
+        if apparent_size < 0.25 and apparent_size > dithering_threshold:
+            if obj.type == 'star':
+                brightness = obj.features['brightness']
+                # Applica dithering solo se l'oggetto è abbastanza luminoso
+                if brightness > 0.3 and random.random() < apparent_size * brightness * 4:
+                    color = self._get_pygame_color(obj.features['color'])
+                    # Riduce l'intensità del colore in base alla dimensione apparente
+                    color = tuple(int(c * (apparent_size * 4)) for c in color)
+                    if self.use_pygame:
+                        pygame.draw.circle(surface, color, projected_pos, 1)
             return
 
         char, detailed_view, color = obj.get_char_at_distance(distance)
 
         if self.use_pygame:
-            # Pygame rendering
+            # Modifica il rendering per Pygame
             if not detailed_view:
                 # Rendering semplificato per oggetti distanti
-                size = max(2, int(apparent_size * 10))
+                size = max(1, int(apparent_size * 15))  # Aumentato il fattore di scala
                 color_rgb = self._get_pygame_color(color)
+
+                # Aggiungi effetto di luminosità per le stelle
+                if obj.type == 'star':
+                    brightness = obj.features['brightness']
+                    # Aggiungi glow per stelle luminose
+                    if brightness > 0.5:
+                        glow_size = size * 2
+                        glow_surface = pygame.Surface((glow_size * 2, glow_size * 2), pygame.SRCALPHA)
+                        for radius in range(glow_size, 0, -1):
+                            alpha = int(255 * (radius / glow_size) * 0.3 * brightness)
+                            glow_color = (*color_rgb, alpha)
+                            pygame.draw.circle(glow_surface, glow_color, (glow_size, glow_size), radius)
+                        surface.blit(glow_surface,
+                                     (projected_pos[0] - glow_size, projected_pos[1] - glow_size),
+                                     special_flags=pygame.BLEND_ADD)
+
                 pygame.draw.circle(surface, color_rgb, projected_pos, size)
             else:
                 # Rendering dettagliato per oggetti vicini
@@ -509,24 +574,7 @@ class SpaceGameEngine:
                 pygame.draw.circle(surface, color_rgb, projected_pos, size)
 
                 if obj.type == 'planet':
-                    # Aggiungi dettagli al pianeta
                     self._add_planet_details(surface, projected_pos, size, obj, color_rgb)
-        else:
-            # Curses rendering (codice originale)
-            color_pair = curses.color_pair(color)
-
-            if not detailed_view:
-                if (0 <= projected_pos[0] < self.screen_width and
-                        0 <= projected_pos[1] < self.screen_height):
-                    try:
-                        surface.addch(projected_pos[1], projected_pos[0], char, color_pair)
-                    except curses.error:
-                        pass
-            else:
-                size_factor = min(5.0, max(1.0, 20.0 / distance))
-                scaled_view = self.scale_detailed_view(detailed_view, size_factor)
-
-                self._render_detailed_view(surface, scaled_view, projected_pos, color_pair)
 
     def _get_pygame_color(self, curses_color):
         """Converte i colori curses in colori RGB per Pygame."""
@@ -622,41 +670,7 @@ class SpaceGameEngine:
             (11, 0),
             lambda state: "EMERGENCY BRAKE ACTIVE" if state.get('braking', False) else ""
         ))
-
-    def project_point(self, point: Vector3D) -> Tuple[int, int]:
-        if not self.camera:
-            return (-1, -1)
-
-        # Calcola la posizione relativa alla camera
-        relative_point = point - self.camera.position
-
-        # Applica la rotazione della camera
-        rotated = relative_point.rotate_y(-self.camera.rotation_y).rotate_x(-self.camera.rotation_x)
-
-        # Controllo della distanza aumentato
-        if rotated.z <= self.near_plane or rotated.z > self.far_plane:
-            return (-1, -1)
-
-        # Proiezione prospettica con FOV corretto
-        fov_rad = math.radians(self.fov)
-        aspect_ratio = self.screen_width / self.screen_height
-
-        # Modificato il fattore di scala per migliorare la visibilità a lunga distanza
-        scale_y = 1.0 / math.tan(fov_rad / 2)
-        scale_x = scale_y / aspect_ratio
-
-        # Aggiungi un fattore di scala basato sulla distanza per oggetti lontani
-        distance_scale = min(1.0, 10.0 / (rotated.z / 100.0))
-
-        screen_x = rotated.x / rotated.z * scale_x * distance_scale
-        screen_y = rotated.y / rotated.z * scale_y * distance_scale
-
-        # Converti in coordinate schermo
-        x = int(self.screen_width / 2 * (1 + screen_x))
-        y = int(self.screen_height / 2 * (1 - screen_y))
-
-        return (x, y)
-
+    
     def init_colors(self):
         """Inizializza le coppie di colori per curses."""
         curses.start_color()
@@ -1083,7 +1097,7 @@ if __name__ == "__main__":
     else:
         use_pygame = PYGAME_AVAILABLE
 
-    use_pygame = False
+    #use_pygame = False
 
     if use_pygame:
         main(None, use_pygame)
