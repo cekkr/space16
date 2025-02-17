@@ -93,9 +93,12 @@ class CelestialObject:
         }
 
     def get_char_at_distance(self, distance: float) -> Tuple[str, List[str]]:
-        """Restituisce la rappresentazione appropriata basata sulla distanza."""
-        if distance > 50:
-            # Stella lontana
+        # Calcola dimensione apparente
+        apparent_size = self.size / max(distance, 0.1)
+
+        if apparent_size < 0.25:
+            return '', []  # Too small to render
+        elif distance > 50:
             brightness = self.features['brightness']
             if brightness > 0.8:
                 return '*', []
@@ -104,19 +107,12 @@ class CelestialObject:
             elif brightness > 0.2:
                 return '.', []
             return '·', []
-        elif distance > 30:
-            # Pianeta piccolo
-            return '@', PLANET_SIZES['tiny']
-        elif distance > 15:
-            # Pianeta medio
-            return 'O', PLANET_SIZES['small']
         else:
-            # Pianeta dettagliato
-            return '#', self.generate_detailed_view()
+            # Genera vista dettagliata con dimensione basata sulla distanza
+            size = int(20 + (50 / max(distance, 1.0)))
+            return '#', self.generate_detailed_view(size)
 
-    def generate_detailed_view(self) -> List[str]:
-        """Genera una vista dettagliata del pianeta."""
-        size = 20
+    def generate_detailed_view(self, size: int) -> List[str]:
         view = []
         surface = self.features['surface_type']
         density = self.features['pattern_density']
@@ -124,9 +120,6 @@ class CelestialObject:
 
         for y in range(size):
             row = ""
-            angle = 2 * math.pi * y / size
-
-            # Calcola l'intensità della riga basata sulla posizione y
             y_factor = 1.0 - abs(y - size / 2) / (size / 2)
             width = int(size * y_factor)
             padding = (size - width) // 2
@@ -136,21 +129,25 @@ class CelestialObject:
                     row += " "
                     continue
 
-                # Genera pattern procedurali basati sul tipo di superficie
                 if surface == 'rocky':
-                    val = noise_2d(x / 5 + self.features['rotation_angle'], y / 5) * density
-                    char = '█' if val > 0.6 else '▓' if val > 0.4 else '▒' if val > 0.2 else '░'
+                    # Pattern più dettagliato per pianeti rocciosi
+                    val = (noise_2d(x / 3 + self.features['rotation_angle'], y / 3) * 0.5 +
+                           noise_2d(x / 7 + self.features['rotation_angle'], y / 7) * 0.3 +
+                           noise_2d(x / 13, y / 13) * 0.2) * density
+                    char = '█' if val > 0.7 else '▓' if val > 0.5 else '▒' if val > 0.3 else '░'
                 elif surface == 'gaseous':
-                    band_val = math.sin(y * bands * math.pi / size)
-                    char = '═' if band_val > 0.3 else '─' if band_val > 0 else ' '
+                    # Bande più complesse per giganti gassosi
+                    band_val = (math.sin(y * bands * math.pi / size) +
+                                math.sin(y * (bands + 1) * math.pi / size) * 0.5) * density
+                    char = '═' if band_val > 0.5 else '─' if band_val > 0 else ' '
                 else:  # ice
-                    val = noise_2d(x / 3, y / 3) * density
-                    char = '❄' if val > 0.7 else '•' if val > 0.4 else '·'
+                    # Pattern cristallini per pianeti ghiacciati
+                    val = (noise_2d(x / 4, y / 4) * 0.6 +
+                           noise_2d(x / 8, y / 8) * 0.4) * density
+                    char = '❄' if val > 0.8 else '•' if val > 0.5 else '·'
 
                 row += char
-
             view.append(row)
-
         return view
 
 def noise_2d(x: float, y: float) -> float:
@@ -169,42 +166,42 @@ class GameObject:
     rotation_y: float = 0.0
     rotation_x: float = 0.0
     velocity: Vector3D = field(default_factory=lambda: Vector3D(0, 0, 0))
-    target_rotation_x: float = 0.0  # Rotazione target per interpolazione smooth
+    target_rotation_x: float = 0.0
     target_rotation_y: float = 0.0
 
     def update(self, delta_time: float):
+        # Aggiorna posizione basata sulla velocità attuale
         self.position = self.position + (self.velocity * delta_time)
 
-        # Interpola smoothly verso la rotazione target
-        rotation_speed = 5.0 * delta_time
-        self.rotation_x += (self.target_rotation_x - self.rotation_x) * rotation_speed
-        self.rotation_y += (self.target_rotation_y - self.rotation_y) * rotation_speed
+        # Interpola rotazione più lentamente senza limiti
+        rotation_speed = 3.0 * delta_time
+        self.rotation_x = self.target_rotation_x
+        self.rotation_y = self.target_rotation_y
 
-        # Limita la rotazione verticale
-        self.rotation_x = max(min(self.rotation_x, math.pi / 2), -math.pi / 2)
-        self.target_rotation_x = max(min(self.target_rotation_x, math.pi / 2), -math.pi / 2)
+        # Normalizza solo la rotazione orizzontale
+        self.rotation_y = self.rotation_y % (2 * math.pi)
+        # La rotazione verticale può andare oltre i 360 gradi
 
-        # Applica frizione
-        friction = 0.99
+        # Attrito molto ridotto
+        friction = 0.999
         self.velocity = self.velocity * pow(friction, delta_time * 60)
 
     def emergency_brake(self, delta_time: float):
-        """Applica una forte decelerazione per fermare la nave."""
-        brake_force = 5.0 * delta_time
+        brake_force = 2.0 * delta_time
         self.velocity = self.velocity * (1.0 - brake_force)
 
     def get_forward_vector(self) -> Vector3D:
-        # Calcola il vettore direzione considerando entrambe le rotazioni
-        cos_pitch = math.cos(self.rotation_x)
+        # Calcola direzione considerando entrambe le rotazioni
         return Vector3D(
-            math.sin(self.rotation_y) * cos_pitch,
-            -math.sin(self.rotation_x),
-            math.cos(self.rotation_y) * cos_pitch
+            math.sin(self.rotation_y) * math.cos(self.rotation_x),
+            math.sin(self.rotation_x),
+            math.cos(self.rotation_y) * math.cos(self.rotation_x)
         )
 
     def apply_thrust(self, amount: float):
         forward = self.get_forward_vector()
-        self.velocity = self.velocity + (forward * amount)
+        # Aumenta significativamente la potenza della spinta
+        self.velocity = self.velocity + (forward * (amount * 2.0))
 
     def accelerate(self, amount: float):
         # Accelera nella direzione corrente
@@ -287,20 +284,33 @@ class Camera:
         self.rotation_y = 0.0
         self.distance = 15.0
         self.height_offset = 5.0
-        self.lag_factor = 0.1  # Fattore di ritardo per il movimento smooth
+        self.lag_factor = 0.05  # Ridotto per un movimento più fluido
 
     def update(self, delta_time: float):
         if self.target:
-            # Interpola rotazione
+            # Interpola rotazione più lentamente
             self.rotation_x += (self.target.rotation_x - self.rotation_x) * self.lag_factor
             self.rotation_y += (self.target.rotation_y - self.rotation_y) * self.lag_factor
 
-            # Calcola posizione target della camera
+            # Calcola posizione target considerando entrambe le rotazioni
             forward = self.target.get_forward_vector()
-            target_pos = self.target.position + (forward * -self.distance)
-            target_pos.y += self.height_offset
+            right = Vector3D(
+                math.cos(self.target.rotation_y),
+                0,
+                -math.sin(self.target.rotation_y)
+            )
+            up = Vector3D(
+                math.sin(self.target.rotation_y) * math.sin(self.target.rotation_x),
+                math.cos(self.target.rotation_x),
+                math.cos(self.target.rotation_y) * math.sin(self.target.rotation_x)
+            )
 
-            # Interpola posizione
+            # Posizione target più naturale
+            target_pos = self.target.position
+            target_pos = target_pos + (forward * -self.distance)
+            target_pos = target_pos + (up * self.height_offset)
+
+            # Interpola posizione più lentamente
             self.position = Vector3D(
                 self.position.x + (target_pos.x - self.position.x) * self.lag_factor,
                 self.position.y + (target_pos.y - self.position.y) * self.lag_factor,
@@ -315,13 +325,13 @@ class SpaceGameEngine:
         self.player_ship: GameObject = None
         self.camera: Camera = None
         self.last_frame_time = time.time()
-        self.fov = 60.0
+        self.fov = 30.0
         self.near_plane = 0.1
-        self.far_plane = 1000.0
+        self.far_plane = 10000.0
 
         self.hud = HUDSystem()
         self.setup_hud()
-        self.generate_celestial_objects(1000)
+        self.generate_celestial_objects(10000)
 
     def setup_hud(self):
         # Velocità
@@ -370,7 +380,7 @@ class SpaceGameEngine:
             pos = Vector3D(
                 random.uniform(-200, 200),
                 random.uniform(-200, 200),
-                random.uniform(0, 400)
+                random.uniform(-400, 400)
             )
 
             # 20% di probabilità di essere un pianeta
