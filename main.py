@@ -670,7 +670,7 @@ class SpaceGameEngine:
             (11, 0),
             lambda state: "EMERGENCY BRAKE ACTIVE" if state.get('braking', False) else ""
         ))
-    
+
     def init_colors(self):
         """Inizializza le coppie di colori per curses."""
         curses.start_color()
